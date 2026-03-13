@@ -1,0 +1,10 @@
+{
+  "name": "polymarket-arbitrage",
+  "version": "1.0.0",
+  "description": "Background arbitrage daemon for Moltworker",
+  "main": "daemon.js",
+  "dependencies": {
+    "ethers": "^6.11.1",
+    "ws": "^8.16.0"
+  }
+}
