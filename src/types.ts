@@ -18,6 +18,7 @@ export interface MoltbotEnv {
   // Direct provider configuration
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_BASE_URL?: string;
+  ANTHROPIC_MODEL?: string; // Override default model when using ANTHROPIC_BASE_URL with a non-Anthropic provider
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   MOLTBOT_GATEWAY_TOKEN?: string; // Gateway token (mapped to OPENCLAW_GATEWAY_TOKEN for container)
