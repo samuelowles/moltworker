@@ -47,7 +47,7 @@ function transformErrorMessage(message: string, host: string): string {
   return message;
 }
 
-export { Sandbox };
+export { Sandbox as BtcSandbox };
 
 /**
  * Validate required environment variables.

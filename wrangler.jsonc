@@ -35,7 +35,7 @@
   // Container configuration for the Moltbot sandbox
   "containers": [
     {
-      "class_name": "Sandbox",
+      "class_name": "BtcSandbox",
       "image": "./Dockerfile",
       "instance_type": "standard-1",
       "max_instances": 1,
@@ -44,14 +44,14 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "Sandbox",
+        "class_name": "BtcSandbox",
         "name": "Sandbox",
       },
     ],
   },
   "migrations": [
     {
-      "new_sqlite_classes": ["Sandbox"],
+      "new_sqlite_classes": ["BtcSandbox"],
       "tag": "v1",
     },
   ],
