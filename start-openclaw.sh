@@ -179,13 +179,14 @@ if (process.env.OPENCLAW_DEV_MODE === 'true') {
 // to use the correct model name for the provider.
 if (process.env.ANTHROPIC_MODEL) {
     const modelId = process.env.ANTHROPIC_MODEL;
+    const baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
     config.agents = config.agents || {};
     config.agents.defaults = config.agents.defaults || {};
     config.agents.defaults.model = { primary: 'anthropic/' + modelId };
-    // Also ensure the model is in the provider's model list
     config.models = config.models || {};
     config.models.providers = config.models.providers || {};
     config.models.providers.anthropic = config.models.providers.anthropic || {};
+    config.models.providers.anthropic.baseUrl = baseUrl;
     config.models.providers.anthropic.models = config.models.providers.anthropic.models || [];
     const exists = config.models.providers.anthropic.models.some(m => m.id === modelId);
     if (!exists) {
@@ -193,7 +194,7 @@ if (process.env.ANTHROPIC_MODEL) {
             id: modelId, name: modelId, contextWindow: 131072, maxTokens: 8192
         });
     }
-    console.log('Anthropic model override: ' + modelId);
+    console.log('Anthropic model override: ' + modelId + ' baseUrl: ' + baseUrl);
 }
 
 // AI Gateway model override (CF_AI_GATEWAY_MODEL=provider/model-id)
