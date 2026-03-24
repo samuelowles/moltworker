@@ -71,6 +71,12 @@
   "browser": {
     "binding": "BROWSER",
   },
+  // Non-secret environment variables (persisted across deploys)
+  "vars": {
+    "ANTHROPIC_MODEL": "MiniMax-M2.7",
+    "DRY_RUN": "true",
+    "ANTHROPIC_BASE_URL": "https://api.minimax.io/anthropic",
+  },
   // Note: CF_ACCOUNT_ID should be set via `wrangler secret put CF_ACCOUNT_ID`
   // Secrets to configure via `wrangler secret put`:
   //

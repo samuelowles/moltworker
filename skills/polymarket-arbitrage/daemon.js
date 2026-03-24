@@ -215,8 +215,13 @@ async function submitOrderToCLOB(signedOrder) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  MARKET DISCOVERY (Gamma API)
+//  MARKET DISCOVERY (Slug-Based — Gamma Events API)
 // ═══════════════════════════════════════════════════════
+const SLUG_PREFIX = "btc-updown-5m-";
+const INTERVAL_SECS = 300;
+const startPrices = new Map();
+let pollCount = 0;
+
 function fetchJson(url) {
     return new Promise((resolve, reject) => {
         https.get(url, (res) => {
@@ -230,65 +235,120 @@ function fetchJson(url) {
     });
 }
 
+function nextBoundaries(nowSecs, count = 3) {
+    const current = Math.floor(nowSecs / INTERVAL_SECS) * INTERVAL_SECS;
+    return Array.from({ length: count }, (_, i) => current + i * INTERVAL_SECS);
+}
+
+async function fetchEventBySlug(slug) {
+    try {
+        const url = `${CONFIG.GAMMA_API_URL}/events?slug=${slug}`;
+        const data = await fetchJson(url);
+        if (Array.isArray(data) && data.length > 0) return data[0];
+    } catch (e) {
+        // Slug not found — normal for future boundaries
+    }
+    return null;
+}
+
 async function discoverMarkets() {
     try {
-        const url = `${CONFIG.GAMMA_API_URL}/markets?active=true&closed=false&limit=100`;
-        const markets = await fetchJson(url);
+        pollCount++;
+        const nowMs = Date.now();
+        const nowSecs = Math.floor(nowMs / 1000);
+        const boundaries = nextBoundaries(nowSecs, 3);
+        const slugs = boundaries.map((ts) => `${SLUG_PREFIX}${ts}`);
 
-        if (!Array.isArray(markets)) return;
-
-        const now = Date.now();
         let discovered = 0;
 
-        for (const market of markets) {
-            const q = (market.question || "").toLowerCase();
-            const isBtc = q.includes("bitcoin") || q.includes("btc");
-            const is5min = q.includes("5 minute") || q.includes("5min") || q.includes("five minute");
+        const results = await Promise.all(slugs.map(fetchEventBySlug));
 
-            if (!isBtc || !is5min) continue;
+        for (let i = 0; i < slugs.length; i++) {
+            const slug = slugs[i];
+            const event = results[i];
+            if (!event) continue;
 
-            const endTime = market.end_date_iso ? new Date(market.end_date_iso).getTime() : 0;
-            const timeToClose = endTime - now;
+            const eventMarkets = event.markets || [];
+            if (eventMarkets.length === 0) continue;
 
-            if (timeToClose > 0 && timeToClose < 5 * 60 * 1000) {
-                const tokens = market.tokens || [];
-                const yesToken = tokens.find((t) => t.outcome === "Yes");
-                const noToken = tokens.find((t) => t.outcome === "No");
+            const m = eventMarkets[0];
+            if (!m.acceptingOrders) continue;
 
-                if (yesToken && noToken) {
-                    activeMarkets.set(market.condition_id, {
-                        conditionId: market.condition_id,
-                        question: market.question,
-                        endTime,
-                        timeToClose,
-                        yesTokenId: yesToken.token_id,
-                        noTokenId: noToken.token_id,
-                        yesPrice: parseFloat(yesToken.price || "0.5"),
-                        noPrice: parseFloat(noToken.price || "0.5"),
-                        strikePrice: extractStrikePrice(market.question),
-                    });
-                    discovered++;
-                }
+            const cid = m.conditionId || "";
+            if (activeMarkets.has(cid)) continue;
+
+            let clobIds;
+            try {
+                clobIds = typeof m.clobTokenIds === "string"
+                    ? JSON.parse(m.clobTokenIds) : (m.clobTokenIds || []);
+            } catch { clobIds = []; }
+
+            if (clobIds.length < 2) {
+                console.warn(`[DISCOVERY] Market ${slug} has ${clobIds.length} token IDs, skipping`);
+                continue;
+            }
+
+            let prices;
+            try {
+                prices = typeof m.outcomePrices === "string"
+                    ? JSON.parse(m.outcomePrices) : (m.outcomePrices || ["0.5", "0.5"]);
+            } catch { prices = ["0.5", "0.5"]; }
+
+            const endDate = m.endDate || "";
+            let endTs;
+            try {
+                endTs = new Date(endDate.replace("Z", "+00:00")).getTime();
+            } catch { continue; }
+
+            const startTimeStr = m.eventStartTime || m.startDate || "";
+            let startTs;
+            try {
+                startTs = new Date(startTimeStr.replace("Z", "+00:00")).getTime();
+            } catch { startTs = endTs - INTERVAL_SECS * 1000; }
+
+            const timeToClose = endTs - nowMs;
+            if (timeToClose <= 0 || timeToClose > 600_000) continue;
+
+            activeMarkets.set(cid, {
+                conditionId: cid,
+                question: m.question || event.title || "",
+                endTime: endTs,
+                startTime: startTs,
+                yesTokenId: clobIds[0],
+                noTokenId: clobIds[1],
+                yesPrice: parseFloat(prices[0]) || 0.5,
+                noPrice: parseFloat(prices[1]) || 0.5,
+                slug,
+            });
+            discovered++;
+        }
+
+        // Prune expired
+        for (const [id, mkt] of activeMarkets.entries()) {
+            if (mkt.endTime < nowMs) {
+                activeMarkets.delete(id);
+                startPrices.delete(id);
             }
         }
 
-        // Prune expired markets
-        for (const [id, m] of activeMarkets.entries()) {
-            if (m.endTime < now) activeMarkets.delete(id);
+        if (pollCount <= 5 || discovered > 0) {
+            console.log(
+                `[DISCOVERY] Poll #${pollCount}: slugs=[${slugs.map(s => s.split("-").pop()).join(",")}] ` +
+                `discovered=${discovered} tracked=${activeMarkets.size}`
+            );
         }
-
         if (discovered > 0) {
-            console.log(`[DISCOVERY] Found ${discovered} active 5-min BTC markets. Total tracked: ${activeMarkets.size}`);
+            for (const mkt of activeMarkets.values()) {
+                const ttc = ((mkt.endTime - nowMs) / 1000).toFixed(0);
+                console.log(
+                    `  → ${(mkt.question || "").slice(0, 60)} | slug=${mkt.slug} | ` +
+                    `Up=${mkt.yesPrice} Down=${mkt.noPrice} | closes in ${ttc}s`
+                );
+            }
         }
     } catch (e) {
         console.error(`[DISCOVERY] Error: ${e.message}`);
     }
-}
-
-function extractStrikePrice(question) {
-    const match = question.match(/\$?([\d,]+\.?\d*)/);
-    if (match) return parseFloat(match[1].replace(/,/g, ""));
-    return 0;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -378,39 +438,39 @@ async function evaluateAllMarkets() {
     for (const [conditionId, market] of activeMarkets.entries()) {
         if (recentTrades.has(conditionId)) continue;
 
-        const timeToClose = market.endTime - now;
-        if (timeToClose <= 0 || timeToClose > 60_000) continue;
+        const timeToCloseMs = market.endTime - now;
+        if (timeToCloseMs <= 0 || timeToCloseMs > 60_000) continue;
 
-        const spotAboveStrike = currentSpotPrice > market.strikePrice;
-        const spotBelowStrike = currentSpotPrice < market.strikePrice;
+        if (!startPrices.has(conditionId)) {
+            startPrices.set(conditionId, currentSpotPrice);
+            console.log(`[GAP] Captured start price for ${conditionId.slice(0, 16)}...: $${currentSpotPrice.toFixed(2)}`);
+        }
+        const refPrice = startPrices.get(conditionId);
+        const timeToCloseSec = timeToCloseMs / 1000;
 
-        // The gap: if spot is clearly above strike, YES should be near 1.00.
-        // If YES is still lagging significantly below fair value, that's an
-        // opportunity to buy YES cheaply.
-        if (spotAboveStrike) {
-            const fairYes = estimateFairPrice(currentSpotPrice, market.strikePrice, timeToClose);
-            const gap = fairYes - market.yesPrice;
+        if (currentSpotPrice > refPrice) {
+            const fairUp = estimateFairPrice(currentSpotPrice, refPrice, timeToCloseSec);
+            const gap = fairUp - market.yesPrice;
 
             if (gap > CONFIG.GAP_THRESHOLD_PERCENT) {
-                await executeTrade(market, "YES", market.yesTokenId, market.yesPrice, gap);
+                await executeTrade(market, "UP", market.yesTokenId, market.yesPrice, gap);
             }
-        } else if (spotBelowStrike) {
-            const fairNo = estimateFairPrice(market.strikePrice, currentSpotPrice, timeToClose);
-            const gap = fairNo - market.noPrice;
+        } else if (currentSpotPrice < refPrice) {
+            const fairDown = estimateFairPrice(currentSpotPrice, refPrice, timeToCloseSec);
+            const gap = fairDown - market.noPrice;
 
             if (gap > CONFIG.GAP_THRESHOLD_PERCENT) {
-                await executeTrade(market, "NO", market.noTokenId, market.noPrice, gap);
+                await executeTrade(market, "DOWN", market.noTokenId, market.noPrice, gap);
             }
         }
     }
 }
 
-function estimateFairPrice(winningPrice, losingPrice, timeToCloseMs) {
-    const priceDiff = Math.abs(winningPrice - losingPrice);
-    const pctDiff = priceDiff / winningPrice;
-    const timeDecay = Math.max(0, 1 - (timeToCloseMs / 60_000));
-    // The closer we are to settlement and the larger the price diff,
-    // the more likely the winning side settles at 1.00
+function estimateFairPrice(spotPrice, refPrice, timeToCloseSec) {
+    if (refPrice <= 0 || spotPrice <= 0) return 0.5;
+    const priceDiff = Math.abs(spotPrice - refPrice);
+    const pctDiff = priceDiff / refPrice;
+    const timeDecay = Math.max(0, 1 - (timeToCloseSec / 60));
     return Math.min(0.99, 0.5 + (pctDiff * 500 * timeDecay));
 }
 
